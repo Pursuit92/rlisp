@@ -1,8 +1,8 @@
 extern crate regex;
 
 use std::collections::HashMap;
-use std::iter;
 use list;
+use std::iter::Peekable;
 
 use self::regex::Regex;
 
@@ -53,27 +53,40 @@ impl<'a> Lexer<'a> {
         Lexer{ res: Matcher::new(), input: input }
     }
     pub fn parse(self) -> Parser<'a> {
-        Parser(self)
+        Parser(self.peekable())
     }
 }
 
-pub struct Parser<'a>(Lexer<'a>);
+pub struct Parser<'a>(Peekable<Lexer<'a>>);
 
 impl<'a> Iterator for Parser<'a> {
     type Item = Val<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.0.next() {
-            Some(Token(tokType, text)) => match tokType {
-                //TokType::LPAREN => None,
-                TokType::IDENT => Some(Val::Ident(text)),
-                TokType::STRING => Some(Val::String(&text[1..text.len()-1])),
-                TokType::BOOLEAN => match text {
-                    "#t" | "#T" => Some(Val::Bool(true)),
-                    _ => Some((Val::Bool(false))),
+        match self.0.peek() {
+            // Some(&Token(TokType::LPAREN, _)) => self.parse_list(),
+            _ => match self.0.next() {
+                Some(Token(tok_type, text)) => match tok_type {
+                    //TokType::LPAREN => None,
+                    TokType::IDENT => Some(Val::Ident(text)),
+                    TokType::STRING => Some(Val::String(&text[1..text.len()-1])),
+                    TokType::BOOLEAN => match text {
+                        "#t" | "#T" => Some(Val::Bool(true)),
+                        _ => Some((Val::Bool(false))),
+                    },
+                    _ => self.next(),
                 },
-                _ => self.next(),
-            },
-            None => None,
+                None => None,
+            }
+        }
+    }
+}
+
+impl<'a> Parser<'a> {
+    fn parse_list(&mut self) -> Option<Val<'a>> {
+        self.next(); // skip open paren
+        let l: list::List<Box<Val<'a>>> = list::List::new();
+        loop {
+            
         }
     }
 }
@@ -85,7 +98,7 @@ impl<'a> Iterator for Lexer<'a> {
         match self.res.match_str(self.input) {
             None => None,
             Some((TokType::EOF,_,_)) => None,
-            Some((tokType, text, rest)) => match tokType {
+            Some((tok_type, text, rest)) => match tok_type {
                 TokType::EOF => None,
                 TokType::WS | TokType::NL => {
                     self.input = rest;
@@ -93,7 +106,7 @@ impl<'a> Iterator for Lexer<'a> {
                 },
                 _ => {
                     self.input = rest;
-                    Some(Token(tokType, text))
+                    Some(Token(tok_type, text))
                 }
             },
         }
@@ -124,10 +137,10 @@ impl Matcher {
     }
     pub fn match_str<'a>(&self, s: &'a str) -> Option<(TokType, &'a str, &'a str)> {
         let mut ret = None;
-        for (reType, re) in self.0.iter() {
+        for (re_type, re) in self.0.iter() {
             match re.find(&*s) {
                 Some((0, end)) => {
-                    ret = Some(((*reType).clone(), &s[..end], &s[end..]));
+                    ret = Some(((*re_type).clone(), &s[..end], &s[end..]));
                 },
                 _ => {},
             }
