@@ -3,6 +3,9 @@ extern crate regex;
 use std::collections::HashMap;
 use list;
 use std::iter::Peekable;
+use std::fmt;
+use std::f64;
+use std::str::FromStr;
 
 use self::regex::Regex;
 
@@ -13,6 +16,18 @@ pub enum Val<'a> {
     Num(f64),
     String(&'a str),
     List(list::List<Box<Val<'a>>>)
+}
+
+impl<'a> fmt::Display for Val<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Val::Ident(istr) => write!(f, "{}", istr),
+            &Val::Bool(b) => write!(f, "{}", b),
+            &Val::Num(n) => write!(f, "{}", n),
+            &Val::String(s) => write!(f, r#""{}""#, s),
+            &Val::List(ref l) => write!(f, "{}", l),
+        }
+    }
 }
 
 #[derive(Eq,Hash,PartialEq,PartialOrd,Debug,Clone)]
@@ -46,14 +61,21 @@ pub struct Token<'a>(TokType, &'a str);
 pub struct Lexer<'a> {
     res: Matcher,
     input: &'a str,
+    line: usize,
+    col: usize,
+    pos: usize,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Lexer {
-        Lexer{ res: Matcher::new(), input: input }
+        Lexer{ res: Matcher::new(), input: input, line: 0, col: 0, pos: 0 }
     }
     pub fn parse(self) -> Parser<'a> {
         Parser(self.peekable())
+    }
+
+    pub fn error(&self, msg: &str) {
+        println!("{} at line: {}, col: {}", msg, self.line, self.col)
     }
 }
 
@@ -63,16 +85,16 @@ impl<'a> Iterator for Parser<'a> {
     type Item = Val<'a>;
     fn next(&mut self) -> Option<Self::Item> {
         match self.0.peek() {
-            // Some(&Token(TokType::LPAREN, _)) => self.parse_list(),
+            Some(&Token(TokType::LPAREN, _)) => self.parse_list(),
             _ => match self.0.next() {
                 Some(Token(tok_type, text)) => match tok_type {
-                    //TokType::LPAREN => None,
                     TokType::IDENT => Some(Val::Ident(text)),
                     TokType::STRING => Some(Val::String(&text[1..text.len()-1])),
                     TokType::BOOLEAN => match text {
                         "#t" | "#T" => Some(Val::Bool(true)),
                         _ => Some((Val::Bool(false))),
                     },
+                    TokType::NUMBER => Some(Val::Num(f64::from_str(text).unwrap())),
                     _ => self.next(),
                 },
                 None => None,
@@ -83,11 +105,20 @@ impl<'a> Iterator for Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_list(&mut self) -> Option<Val<'a>> {
-        self.next(); // skip open paren
-        let l: list::List<Box<Val<'a>>> = list::List::new();
+        self.0.next(); // skip open paren
+        let mut l: list::List<Box<Val<'a>>> = list::List::new();
         loop {
-            
+            match self.0.peek() {
+                Some(&Token(TokType::RPAREN, _)) => break,
+                Some(_) => match self.next() {
+                    Some(v) => l = l.push(Box::new(v)),
+                    None => return None,
+                },
+                None => return None,
+            };
         }
+        self.0.next(); // skip close paren
+        Some(Val::List(l.reverse()))
     }
 }
 
@@ -95,18 +126,26 @@ impl<'a> Iterator for Lexer<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.res.match_str(self.input) {
+        match self.res.match_str(&self.input[self.pos..]) {
             None => None,
-            Some((TokType::EOF,_,_)) => None,
-            Some((tok_type, text, rest)) => match tok_type {
+            Some((TokType::EOF,_)) => None,
+            Some((tok_type, end)) => match tok_type {
                 TokType::EOF => None,
-                TokType::WS | TokType::NL => {
-                    self.input = rest;
+                TokType::WS => {
+                    self.pos += end;
+                    self.col += end;
+                    self.next()
+                },
+                TokType::NL => {
+                    self.pos += end;
+                    self.col = 0;
+                    self.line += end;
                     self.next()
                 },
                 _ => {
-                    self.input = rest;
-                    Some(Token(tok_type, text))
+                    let ret = Some(Token(tok_type, &self.input[self.pos..self.pos+end]));
+                    self.pos += end;
+                    ret
                 }
             },
         }
@@ -135,12 +174,22 @@ impl Matcher {
         m.insert(TokType::STRING, Regex::new(r#""(\\"|[^"])*""#).unwrap());
         Matcher(m)
     }
-    pub fn match_str<'a>(&self, s: &'a str) -> Option<(TokType, &'a str, &'a str)> {
+    pub fn match_str<'a>(&self, s: &'a str) -> Option<(TokType, usize)> {
         let mut ret = None;
         for (re_type, re) in self.0.iter() {
             match re.find(&*s) {
                 Some((0, end)) => {
-                    ret = Some(((*re_type).clone(), &s[..end], &s[end..]));
+                    let new_ret = ((*re_type).clone(), end);
+                    match ret {
+                        None => {
+                            ret = Some(new_ret);
+                        },
+                        Some((_, curr)) => {
+                            if curr < end {
+                                ret = Some(new_ret);
+                            }
+                        }
+                    }
                 },
                 _ => {},
             }

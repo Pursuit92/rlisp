@@ -1,15 +1,13 @@
-mod list;
-mod lispval;
+#![allow(dead_code)]
 
-use list::OwnedIterator;
+mod list;
+mod parse;
+
+use parse::Lexer;
 
 fn main() {
-    let l = list::List::new().push(4).push(5).append(1).reverse();
-    let mut it = l.iter();
-    loop {
-        match it.next_owned() {
-            None => break,
-            _ => println!("stuff"),
-        }
+    let instr = r#"(this is (a 42 #t "list"))"#;
+    for val in Lexer::new(instr).parse() {
+        println!("{}", val);
     }
 }
