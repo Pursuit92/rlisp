@@ -1,37 +1,17 @@
 extern crate regex;
 
-use std::collections::HashMap;
-use list;
-use std::iter::Peekable;
-use std::fmt;
+use val::Val;
+use val::Val::{Ident,Bool,Num,Nil};
+
 use std::f64;
 use std::str::FromStr;
+use std::iter::Peekable;
+use std::collections::HashMap;
 
 use self::regex::Regex;
 
-#[derive(Debug)]
-pub enum Val<'a> {
-    Ident(&'a str),
-    Bool(bool),
-    Num(f64),
-    String(&'a str),
-    List(list::List<Box<Val<'a>>>)
-}
-
-impl<'a> fmt::Display for Val<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &Val::Ident(istr) => write!(f, "{}", istr),
-            &Val::Bool(b) => write!(f, "{}", b),
-            &Val::Num(n) => write!(f, "{}", n),
-            &Val::String(s) => write!(f, r#""{}""#, s),
-            &Val::List(ref l) => write!(f, "{}", l),
-        }
-    }
-}
-
 #[derive(Eq,Hash,PartialEq,PartialOrd,Debug,Clone)]
-pub enum TokType {
+enum TokType {
     EOF,
     WS,
     NL,
@@ -53,25 +33,23 @@ pub enum TokType {
     STRING,
 }
 
-struct Matcher(pub HashMap<TokType, Regex>);
+struct Lexer(pub HashMap<TokType, Regex>);
+pub struct Parser(pub Lexer);
 
 #[derive(Debug)]
-pub struct Token<'a>(TokType, &'a str);
+struct Token<'a>(TokType, &'a str);
 
-pub struct Lexer<'a> {
-    res: Matcher,
+struct LexIter<'a> {
+    lex: &'a Lexer,
     input: &'a str,
     line: usize,
     col: usize,
     pos: usize,
 }
 
-impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Lexer {
-        Lexer{ res: Matcher::new(), input: input, line: 0, col: 0, pos: 0 }
-    }
-    pub fn parse(self) -> Parser<'a> {
-        Parser(self.peekable())
+impl<'a> LexIter<'a> {
+    pub fn parse(self) -> ParseIter<'a> {
+        ParseIter(self.peekable())
     }
 
     pub fn error(&self, msg: &str) {
@@ -79,22 +57,26 @@ impl<'a> Lexer<'a> {
     }
 }
 
-pub struct Parser<'a>(Peekable<Lexer<'a>>);
+pub struct ParseIter<'a>(Peekable<LexIter<'a>>);
 
-impl<'a> Iterator for Parser<'a> {
-    type Item = Val<'a>;
+impl<'a> Iterator for ParseIter<'a> {
+    type Item = Val;
     fn next(&mut self) -> Option<Self::Item> {
         match self.0.peek() {
             Some(&Token(TokType::LPAREN, _)) => self.parse_list(),
             _ => match self.0.next() {
                 Some(Token(tok_type, text)) => match tok_type {
-                    TokType::IDENT => Some(Val::Ident(text)),
-                    TokType::STRING => Some(Val::String(&text[1..text.len()-1])),
+                    TokType::IDENT => Some(Ident(text.to_string())),
+                    TokType::STRING => Some(text[1..text.len()-1].into()),
                     TokType::BOOLEAN => match text {
-                        "#t" | "#T" => Some(Val::Bool(true)),
-                        _ => Some((Val::Bool(false))),
+                        "#t" | "#T" => Some(Bool(true)),
+                        _ => Some((Bool(false))),
                     },
-                    TokType::NUMBER => Some(Val::Num(f64::from_str(text).unwrap())),
+                    TokType::NUMBER => Some(Num(f64::from_str(text).unwrap())),
+                    TokType::SQUOTE => match self.next() {
+                        Some(v) => Some(Val::cons(Ident("quote".to_string()), Val::cons(v, Nil))),
+                        None => None,
+                    },
                     _ => self.next(),
                 },
                 None => None,
@@ -103,30 +85,44 @@ impl<'a> Iterator for Parser<'a> {
     }
 }
 
-impl<'a> Parser<'a> {
-    fn parse_list(&mut self) -> Option<Val<'a>> {
+impl<'a> ParseIter<'a> {
+    fn parse_list(&mut self) -> Option<Val> {
         self.0.next(); // skip open paren
-        let mut l: list::List<Box<Val<'a>>> = list::List::new();
-        loop {
-            match self.0.peek() {
-                Some(&Token(TokType::RPAREN, _)) => break,
-                Some(_) => match self.next() {
-                    Some(v) => l = l.push(Box::new(v)),
+        let mut l = Some(Nil);
+
+        match self.0.peek() {
+            Some(&Token(TokType::RPAREN, _)) => {},
+            Some(_) => { l = self.parse_pair() },
+            None => return None,
+        };
+        self.0.next(); // skip close paren
+        l
+    }
+
+    fn parse_pair(&mut self) -> Option<Val> {
+        match self.next() {
+            Some(head) => match self.0.peek() {
+                Some(&Token(TokType::RPAREN, _)) => Some(Val::cons(head, Nil)),
+                Some(&Token(TokType::DOT, _)) => match self.next() {
+                    Some(tail) => Some(Val::cons(head, tail)),
                     None => return None,
                 },
+                Some(_) => match self.parse_pair() {
+                    Some(tail) => Some(Val::cons(head, tail)),
+                    None => None,
+                },
                 None => return None,
-            };
+            },
+            None => return None,
         }
-        self.0.next(); // skip close paren
-        Some(Val::List(l.reverse()))
     }
 }
 
-impl<'a> Iterator for Lexer<'a> {
+impl<'a> Iterator for LexIter<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.res.match_str(&self.input[self.pos..]) {
+        match self.lex.match_str(&self.input[self.pos..]) {
             None => None,
             Some((TokType::EOF,_)) => None,
             Some((tok_type, end)) => match tok_type {
@@ -152,8 +148,17 @@ impl<'a> Iterator for Lexer<'a> {
     }
 }
 
-impl Matcher {
-    pub fn new() -> Matcher {
+impl Parser {
+    pub fn new() -> Parser {
+        Parser(Lexer::new())
+    }
+    pub fn parse<'a>(&'a self, input: &'a str) -> ParseIter {
+        self.0.lex(input).parse()
+    }
+}
+
+impl Lexer {
+    pub fn new() -> Lexer {
         let mut m = HashMap::new();
         m.insert(TokType::EOF, Regex::new(r"^$").unwrap());
         m.insert(TokType::WS, Regex::new(r"[\t ]+").unwrap());
@@ -172,9 +177,9 @@ impl Matcher {
         m.insert(TokType::NUMBER, Regex::new(r"[0-9]*\.?[0-9]+").unwrap());
         m.insert(TokType::CHARACTER, Regex::new(r"#\\(newline|space|[a-zA-Z])").unwrap());
         m.insert(TokType::STRING, Regex::new(r#""(\\"|[^"])*""#).unwrap());
-        Matcher(m)
+        Lexer(m)
     }
-    pub fn match_str<'a>(&self, s: &'a str) -> Option<(TokType, usize)> {
+    fn match_str<'a>(&self, s: &'a str) -> Option<(TokType, usize)> {
         let mut ret = None;
         for (re_type, re) in self.0.iter() {
             match re.find(&*s) {
@@ -195,5 +200,14 @@ impl Matcher {
             }
         }
         ret
+    }
+    pub fn lex<'a>(&'a self, s: &'a str) -> LexIter<'a> {
+        LexIter{
+            lex: self,
+            input: s,
+            line: 0,
+            col: 0,
+            pos: 0,
+        }
     }
 }
